@@ -7,4 +7,3 @@ It only reads. It never sends G-code. Export ZIP packs the selected run's folder
 - Data contract: `ABI.md` and `src/lib/abi.js`
 - Build: `./build.sh`, which reuses the DWC 3.5.4 checkout of `../dwc-plugin-debug-tools`. Output: `dist/dwc-plugin-heating-test-<version>.zip`
 - Install: DWC, System, Plugins, Install plugin, then enable it
-- Logic check on bench data: `node test/verify.js`
