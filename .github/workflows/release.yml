@@ -1,0 +1,85 @@
+name: Release
+
+# Pushing a tag is the only trigger. The tag names the version, and that version must already be
+# committed in plugin.json — the same rule the debug plugin and the firmware release workflows follow.
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+# A release build is never cancelled by a later run.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # Cheap and first: a mismatch here means the tag or the manifest is wrong, and nothing below
+      # is worth running.
+      - name: Verify the tag against plugin.json
+        id: manifest
+        run: |
+          version="$(node -p 'require("./plugin.json").version')"
+          dwc="$(node -p 'require("./plugin.json").dwcVersion')"
+          build_dwc="$(sed -n 's/^DWC_VERSION=.*:-v\([0-9.]*\)}.*/\1/p' build.sh)"
+
+          [ "$GITHUB_REF_NAME" = "$version" ] \
+            || { echo "tag $GITHUB_REF_NAME does not match plugin.json version $version"; exit 1; }
+          [ "$dwc" = "$build_dwc" ] \
+            || { echo "dwcVersion $dwc does not match DWC_VERSION v$build_dwc in build.sh"; exit 1; }
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Keyed on build.sh, which holds the pinned DWC version; plugin.json would change every release
+      # and guarantee a miss.
+      - name: Restore the DuetWebControl build checkout
+        uses: actions/cache@v4
+        with:
+          path: .dwc-build
+          key: dwc-build-${{ runner.os }}-${{ hashFiles('build.sh') }}
+
+      # build.sh defaults to the debug plugin's checkout in a sibling directory, which does not
+      # exist on a runner, so the build gets its own checkout inside the workspace.
+      - name: Build
+        env:
+          DWC_DIR: ${{ github.workspace }}/.dwc-build
+        run: ./build.sh
+
+      - name: Check the packaged manifest
+        id: artifact
+        run: |
+          zip="dist/dwc-plugin-heating-test-${{ steps.manifest.outputs.version }}.zip"
+          [ -f "$zip" ] || { echo "expected $zip, got:"; ls -l dist || true; exit 1; }
+
+          unzip -p "$zip" plugin.json > packaged.json
+          packed_version="$(node -p 'require("./packaged.json").version')"
+          [ "$packed_version" = "${{ steps.manifest.outputs.version }}" ] \
+            || { echo "the packaged plugin.json disagrees with the source"; exit 1; }
+
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+
+      # gh refuses to overwrite a release that already exists, so a re-run cannot replace a
+      # published zip and silently change what a pinned checksum refers to.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --latest \
+            --generate-notes \
+            --title "Heating Test ${{ steps.manifest.outputs.version }}" \
+            "${{ steps.artifact.outputs.zip }}"
