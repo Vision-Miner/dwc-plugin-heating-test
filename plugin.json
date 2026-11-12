@@ -1,0 +1,11 @@
+{
+    "id": "dwc-plugin-heating-test",
+    "name": "Vision Miner Heating Test",
+    "author": "Vision Miner",
+    "version": "0.1.0",
+    "license": "LGPL-3.0-or-later",
+    "dwcVersion": "3.5.4",
+    "tags": [
+        "diagnostics"
+    ]
+}
