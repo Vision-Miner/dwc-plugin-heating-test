@@ -1,8 +1,11 @@
 // Data contract with sys/lib/heattest/ in vm22-v4-firmware. See ABI.md.
-export const ABI_VERSION = 2
+export const ABI_VERSION = 3
 export const RUNS_DIR = '0:/sys/logs/heattest'
 export const RUN_PREFIX = 'ht'
+// samples-<nnn>.csv, 10 minutes each, from version 3 on
+export const SAMPLES_PART = /^samples-\d+\.csv$/
 export const FILES = {
+    // One file for the whole run before version 3
     samples: 'samples.csv',
     events: 'events.csv',
     header: 'header.csv',

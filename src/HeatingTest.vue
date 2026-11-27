@@ -165,11 +165,11 @@
 
 import JSZip from 'jszip'
 import saveAs from 'file-saver'
-import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR, VOLTMETER_FILE } from './lib/abi.js'
+import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR } from './lib/abi.js'
 import { parseEvents, parseHeader, parseSamples } from './lib/parse.js'
 import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, unexpectedGaps } from './lib/kpi.js'
 import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTime, runTimeLabel } from './lib/labels.js'
-import { textsFromZip } from './lib/zipfiles.js'
+import { addRunFile, addZipFiles, isRunFile, newTexts, samplesOf } from './lib/runfiles.js'
 import { voltmeterReadings } from './lib/voltmeter.js'
 import { whatIf } from './lib/faultModel.js'
 import FaultTable from './FaultTable.vue'
@@ -193,7 +193,11 @@ const COLORS = {
 
 // Frozen so Vue does not walk the columns
 function buildRun(name, texts) {
-    const samples = parseSamples(texts.samples)
+    const text = samplesOf(texts)
+    if (text === undefined) {
+        throw new Error('This run has no samples files')
+    }
+    const samples = parseSamples(text)
     const events = texts.events ? parseEvents(texts.events) : []
     const header = texts.header ? parseHeader(texts.header) : {}
     const voltmeterFiles = Object.assign({}, texts.voltmeter)
@@ -565,35 +569,19 @@ export default {
             }
             return values
         },
-        async download(folder, name, required) {
-            try {
-                return await this.$store.dispatch('machine/download', {
-                    filename: `${RUNS_DIR}/${folder}/${name}`,
-                    type: 'text',
-                    showProgress: required,
-                    showSuccess: false,
-                    showError: false,
-                    closeProgressOnSuccess: true
-                })
-            } catch (e) {
-                if (required) {
-                    throw e
-                }
-                return null
-            }
-        },
         async downloadRun(folder) {
-            const texts = { samples: await this.download(folder, FILES.samples, true), voltmeter: {} }
-            texts.events = await this.download(folder, FILES.events, false)
-            texts.header = await this.download(folder, FILES.header, false)
-            texts.summary = await this.download(folder, FILES.summary, false)
+            const texts = newTexts()
             const items = await this.$store.dispatch('machine/getFileList', `${RUNS_DIR}/${folder}`)
             for (let i = 0; i < items.length; i++) {
-                if (!items[i].isDirectory && VOLTMETER_FILE.test(items[i].name)) {
-                    const text = await this.download(folder, items[i].name, false)
-                    if (text !== null) {
-                        texts.voltmeter[items[i].name] = text
-                    }
+                if (!items[i].isDirectory && isRunFile(items[i].name)) {
+                    addRunFile(texts, items[i].name, await this.$store.dispatch('machine/download', {
+                        filename: `${RUNS_DIR}/${folder}/${items[i].name}`,
+                        type: 'text',
+                        showProgress: items[i].name === FILES.samples,
+                        showSuccess: false,
+                        showError: false,
+                        closeProgressOnSuccess: true
+                    }))
                 }
             }
             return buildRun(folder, texts)
@@ -672,35 +660,25 @@ export default {
             this.$refs.files.value = ''
             this.$refs.files.click()
         },
-        // Runs from other machines, and the older bench CSVs, live on the PC. samples.csv alone is enough.
+        // Runs from other machines, and the older bench CSVs, live on the PC. The samples alone are enough.
         filesChosen(event) {
             const chosen = event.target.files
             return this.withLoading(async () => {
-                const texts = { voltmeter: {} }
+                const texts = newTexts()
                 let name = 'files'
                 for (let i = 0; i < chosen.length; i++) {
                     if (/\.zip$/i.test(chosen[i].name)) {
-                        const fromZip = await textsFromZip(JSZip, chosen[i], FILES)
-                        Object.assign(texts, fromZip, { voltmeter: Object.assign(texts.voltmeter, fromZip.voltmeter) })
+                        await addZipFiles(JSZip, texts, chosen[i])
                         name = chosen[i].name.replace(/\.zip$/i, '')
-                        continue
-                    }
-                    const text = await chosen[i].text()
-                    if (VOLTMETER_FILE.test(chosen[i].name)) {
-                        texts.voltmeter[chosen[i].name] = text
-                    }
-                    const keys = Object.keys(FILES)
-                    for (let k = 0; k < keys.length; k++) {
-                        if (chosen[i].name === FILES[keys[k]]) {
-                            texts[keys[k]] = text
+                    } else if (isRunFile(chosen[i].name)) {
+                        addRunFile(texts, chosen[i].name, await chosen[i].text())
+                        if (chosen[i].name === FILES.samples && chosen[i].webkitRelativePath) {
+                            name = chosen[i].webkitRelativePath
                         }
                     }
-                    if (chosen[i].name === FILES.samples && chosen[i].webkitRelativePath) {
-                        name = chosen[i].webkitRelativePath
-                    }
                 }
-                if (!texts.samples) {
-                    throw new Error(`Choose ${FILES.samples}, or a ZIP that holds it`)
+                if (samplesOf(texts) === undefined) {
+                    throw new Error(`Choose ${FILES.samples} or the samples-<nnn>.csv files, or a ZIP that holds them`)
                 }
                 const loaded = buildRun(name, texts)
                 if (this.pickTarget === 'reference') {

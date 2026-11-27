@@ -74,6 +74,17 @@ export function parseSamples(text) {
     return { n, names, cols, time, gaps, reboots }
 }
 
+// The samples-<nnn>.csv texts in name order as one samples.csv: the column line of the first, the rows of all.
+// Each file is cut after its last complete line, so a file caught before its column line is complete adds nothing.
+export function joinSamples(texts) {
+    let joined = ''
+    for (let i = 0; i < texts.length; i++) {
+        const text = texts[i].substring(0, texts[i].lastIndexOf('\n') + 1)
+        joined += joined === '' ? text : text.substring(text.indexOf('\n') + 1)
+    }
+    return joined
+}
+
 function splitQuoted(line) {
     const cells = []
     let cell = ''
