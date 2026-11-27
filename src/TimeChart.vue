@@ -54,8 +54,17 @@ export default {
         marks: { type: Array, default: () => [] }
     },
     watch: {
-        series() {
-            this.rebuild()
+        // The same curves with more rows, as a live run grows, keep the legend's choices
+        series(now, before) {
+            let same = !!this.chart && now.length === before.length
+            for (let i = 0; same && i < now.length; i++) {
+                same = now[i].label === before[i].label
+            }
+            if (same) {
+                this.refresh()
+            } else {
+                this.rebuild()
+            }
         },
         range() {
             this.refresh()

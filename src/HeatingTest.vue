@@ -4,7 +4,9 @@
       <v-card-title>Heating Test</v-card-title>
       <v-card-text>
         <v-alert v-if="error" type="error" dense text>{{ error }}</v-alert>
-        <v-alert v-if="busy" type="info" dense text>
+        <v-alert v-if="liveError" type="warning" dense text>Live update failed: {{ liveError }}</v-alert>
+        <v-alert v-if="waiting" type="info" dense text>The test is starting: its first rows show here once it has homed.</v-alert>
+        <v-alert v-if="busy && !recording" type="info" dense text>
           The printer is busy. If a test is running, a download slows its logging; the last rows may be missing.
         </v-alert>
 
@@ -191,6 +193,9 @@ const COLORS = {
     mains: '#7e57c2'
 }
 
+// Each look at a recording run downloads the newest samples file, at most 10 minutes of rows, and what else grew
+const LIVE_SECONDS = 15
+
 // Frozen so Vue does not walk the columns
 function buildRun(name, texts) {
     const text = samplesOf(texts)
@@ -248,6 +253,12 @@ function mainsPoints(run, shift) {
     return { x: Float64Array.from(x), y: Float64Array.from(y) }
 }
 
+// The test logs into its folder from the header on, and Step.g starts the first samples file only after homing
+function hasRows(texts) {
+    const text = samplesOf(texts)
+    return text !== undefined && text.split('\n').length > 2
+}
+
 // <serial>_<date>_<time>_<plan>, with the folder name in place of a clock that was not set
 function exportName(folder, header) {
     const clean = (text) => (text || '').replace(/[^A-Za-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '')
@@ -280,13 +291,32 @@ export default {
             loading: false,
             error: null,
             pickTarget: 'main',
-            alignedStep: null
+            alignedStep: null,
+            liveError: null,
+            waiting: false
         }
     },
     computed: {
         busy() {
             const status = this.$store.state.machine.model.state.status
             return status === 'busy' || status === 'processing'
+        },
+        // The folder a test records into: its open log lies inside it
+        runningFolder() {
+            const logFile = this.$store.state.machine.model.state.logFile || ''
+            const dir = `${RUNS_DIR}/`
+            return logFile.indexOf(dir) === 0 ? logFile.substring(dir.length).split('/')[0] : null
+        },
+        // The selected folder is the one a test records into
+        following() {
+            return this.selected !== null && this.selected === this.runningFolder
+        },
+        // The run on screen is the printer's run that a test records into
+        recording() {
+            return !!this.run && this.runningFolder !== null && this.run.name === this.selected && this.selected === this.runningFolder
+        },
+        runEnded() {
+            return this.run.events.some((event) => event.code === EVENT.RUN_END)
         },
         folderItems() {
             const items = []
@@ -522,10 +552,9 @@ export default {
             }
             const status = runStatus(this.run.events, dips)
             if (!status.ended) {
-                // The open log of a running test lies inside its own folder
-                const logFile = this.$store.state.machine.model.state.logFile || ''
-                if (logFile.indexOf(`/${this.run.name}/`) >= 0) {
-                    return { type: 'info', title: 'The run is still in progress', lines }
+                if (this.recording) {
+                    const rows = parseInt(header.abi, 10) >= 3 ? `new rows every ${LIVE_SECONDS} s` : 'Refresh for new rows'
+                    return { type: 'info', title: `The run is still in progress: ${rows}`, lines }
                 }
                 const where = status.lastStep >= 0 ? `in step ${status.lastStep}` : 'before the first step'
                 return { type: 'warning', title: `Run did not finish: it stopped ${where}, so this says nothing about the rest`, lines }
@@ -537,13 +566,44 @@ export default {
         }
     },
     watch: {
-        run() {
+        // The same run, grown by a live look or loaded again, keeps its zoom, and a view that reaches the end follows it
+        run(now, before) {
+            if (now && before && now.name === before.name) {
+                if (this.range[1] >= Math.ceil(before.samples.time[before.samples.n - 1] / 60)) {
+                    this.range = [this.range[0], this.duration]
+                }
+                return
+            }
             this.range = [0, this.duration]
             this.alignedStep = null
+        },
+        // The loop itself starts in showRun, once the followed run is on screen
+        following(now, before) {
+            clearTimeout(this.liveTimer)
+            this.liveError = null
+            // The test has let go of its log: one last look, for the rows and the RUN_END written since the previous one
+            if (!now && before && this.source && this.source.folder === this.selected) {
+                this.schedule(0)
+            }
+        },
+        // A test started while the page is open and shows nothing
+        runningFolder(now) {
+            if (now && !this.selected && !this.run) {
+                this.refresh()
+            }
         }
+    },
+    created() {
+        // Not reactive: the texts of the selected run as downloaded, and the live loop
+        this.source = null
+        this.liveTimer = null
+        this.polling = false
     },
     mounted() {
         this.refresh()
+    },
+    beforeDestroy() {
+        clearTimeout(this.liveTimer)
     },
     methods: {
         runValues(run) {
@@ -569,22 +629,71 @@ export default {
             }
             return values
         },
-        async downloadRun(folder) {
-            const texts = newTexts()
-            const items = await this.$store.dispatch('machine/getFileList', `${RUNS_DIR}/${folder}`)
+        // The run files whose size on the card differs from the last download: all of them the first time, and during a
+        // live run the newest samples file and whatever else grew. True when anything changed.
+        async downloadChanged(source) {
+            const items = await this.$store.dispatch('machine/getFileList', `${RUNS_DIR}/${source.folder}`)
+            let changed = false
             for (let i = 0; i < items.length; i++) {
-                if (!items[i].isDirectory && isRunFile(items[i].name)) {
-                    addRunFile(texts, items[i].name, await this.$store.dispatch('machine/download', {
-                        filename: `${RUNS_DIR}/${folder}/${items[i].name}`,
-                        type: 'text',
-                        showProgress: items[i].name === FILES.samples,
-                        showSuccess: false,
-                        showError: false,
-                        closeProgressOnSuccess: true
-                    }))
+                const item = items[i]
+                if (item.isDirectory || !isRunFile(item.name) || source.sizes[item.name] === item.size) {
+                    continue
                 }
+                // The single samples.csv of a run before version 3 grows to megabytes: never again while it records
+                if (item.name === FILES.samples && source.sizes[item.name] !== undefined) {
+                    continue
+                }
+                addRunFile(source.texts, item.name, await this.$store.dispatch('machine/download', {
+                    filename: `${RUNS_DIR}/${source.folder}/${item.name}`,
+                    type: 'text',
+                    showProgress: item.name === FILES.samples,
+                    showSuccess: false,
+                    showError: false,
+                    closeProgressOnSuccess: true
+                }))
+                source.sizes[item.name] = item.size
+                changed = true
             }
-            return buildRun(folder, texts)
+            return changed
+        },
+        async downloadSource(folder) {
+            const source = { folder, texts: newTexts(), sizes: {} }
+            await this.downloadChanged(source)
+            return source
+        },
+        showSource(source) {
+            this.waiting = source.folder === this.runningFolder && !hasRows(source.texts)
+            this.run = this.waiting ? null : buildRun(source.folder, source.texts)
+        },
+        schedule(ms) {
+            clearTimeout(this.liveTimer)
+            this.liveTimer = setTimeout(() => this.livePoll(), ms)
+        },
+        async livePoll() {
+            const source = this.source
+            if (!source || source.folder !== this.selected) {
+                return
+            }
+            if (this.polling) {
+                this.schedule(1000)
+                return
+            }
+            this.polling = true
+            // One more look after RUN_END, for what End.g writes after it
+            const ended = !!this.run && this.runEnded
+            try {
+                if (await this.downloadChanged(source) && this.source === source) {
+                    this.showSource(source)
+                }
+                this.liveError = null
+            } catch (e) {
+                this.liveError = e.message || `${e}`
+            } finally {
+                this.polling = false
+            }
+            if (!ended && this.following) {
+                this.schedule(LIVE_SECONDS * 1000)
+            }
         },
         async withLoading(job) {
             this.loading = true
@@ -614,19 +723,36 @@ export default {
                 }
                 names.sort().reverse()
                 this.folders = names
+                if (!this.selected && !this.run && names.indexOf(this.runningFolder) >= 0) {
+                    this.selected = this.runningFolder
+                }
                 if (this.selected) {
-                    this.run = await this.downloadRun(this.selected)
+                    await this.showRun(this.selected)
                 }
             })
         },
+        async showRun(folder) {
+            const source = await this.downloadSource(folder)
+            this.source = source
+            this.showSource(source)
+            if (this.following) {
+                this.schedule(LIVE_SECONDS * 1000)
+            }
+        },
         loadSelected() {
             return this.withLoading(async () => {
-                this.run = this.selected ? await this.downloadRun(this.selected) : null
+                if (this.selected) {
+                    await this.showRun(this.selected)
+                } else {
+                    this.source = null
+                    this.run = null
+                    this.waiting = false
+                }
             })
         },
         loadReference() {
             return this.withLoading(async () => {
-                this.reference = this.referenceSelected ? await this.downloadRun(this.referenceSelected) : null
+                this.reference = this.referenceSelected ? buildRun(this.referenceSelected, (await this.downloadSource(this.referenceSelected)).texts) : null
             })
         },
         // The whole run folder, as it is on the card, for support
@@ -685,6 +811,8 @@ export default {
                     this.reference = loaded
                     this.referenceSelected = null
                 } else {
+                    this.source = null
+                    this.waiting = false
                     this.run = loaded
                     this.selected = null
                 }
