@@ -31,6 +31,20 @@ function meanOf(values, from, to) {
     return count > 0 ? sum / count : NaN
 }
 
+// At each row, the mean of the rows in the last `seconds`. Only rows already written count, so when a live run grows
+// the values before its new rows stay as they were.
+export function trailingMean(time, values, seconds) {
+    const out = new Float64Array(values.length)
+    let from = 0
+    for (let i = 0; i < values.length; i++) {
+        while (time[from] <= time[i] - seconds) {
+            from++
+        }
+        out[i] = meanOf(values, from, i + 1)
+    }
+    return out
+}
+
 function mean(values, from, to) {
     let sum = 0
     let count = 0

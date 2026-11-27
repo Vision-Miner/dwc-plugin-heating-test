@@ -42,6 +42,7 @@
           </div>
           <time-chart title="Temperature" unit="C" :height="360" :series="temperatureSeries" :range="range" :marks="marks" />
           <time-chart title="Heaters and fans" :height="240" :series="powerSeries" :range="range" :marks="marks" class="mt-3" />
+          <v-checkbox v-model="averagePower" label="Average heater power" dense hide-details class="mt-0" />
           <time-chart title="Voltages" unit="V" :height="200" :series="voltageSeries" :range="range" :marks="marks" class="mt-3" />
           <time-chart v-if="mainsSeries.length" title="Mains at the socket, from the voltmeter" unit="V" :height="200" :series="mainsSeries" :range="range" :marks="marks" class="mt-3" />
         </v-card-text>
@@ -178,7 +179,7 @@ import JSZip from 'jszip'
 import saveAs from 'file-saver'
 import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR, VOLTMETER_INPUT } from './lib/abi.js'
 import { parseEvents, parseHeader, parseSamples } from './lib/parse.js'
-import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, unexpectedGaps } from './lib/kpi.js'
+import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, trailingMean, unexpectedGaps } from './lib/kpi.js'
 import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTime, runTimeLabel } from './lib/labels.js'
 import { addRunFile, addZipFiles, isRunFile, newTexts, samplesOf } from './lib/runfiles.js'
 import { voltmeterReadings } from './lib/voltmeter.js'
@@ -201,6 +202,11 @@ const COLORS = {
     v12: '#ec407a',
     mains: '#7e57c2'
 }
+
+// Holding a target, the bed's PID and the chamber's on-off control swing the heater output between about 0 and 1 every
+// 10 s to a minute. Over 2 min the bed's swing comes down to about 0.1 either side of its mean, the share of full power
+// it delivers, and a step change reaches half height 1 min late.
+const POWER_AVERAGE_SECONDS = 120
 
 // A plausible mains reading at the socket, 110-120 V and 220-240 V classes with their sag and surge
 const MAINS_LOW = 50
@@ -289,6 +295,20 @@ function exportName(folder, header) {
     return [clean(header.serial), time ? time.replace(' ', '_').replace(':', '-') : folder, clean(header.plan)].filter(Boolean).join('_')
 }
 
+// avgPwm as logged, which the firmware already averages over about 5 s, or its mean over POWER_AVERAGE_SECONDS
+function heaterPower(run, average) {
+    const c = run.samples.cols
+    if (!average) {
+        return { bed: c.H2_pwm, chamber: c.H3_pwm, suffix: '' }
+    }
+    const time = run.samples.time
+    return {
+        bed: trailingMean(time, c.H2_pwm, POWER_AVERAGE_SECONDS),
+        chamber: trailingMean(time, c.H3_pwm, POWER_AVERAGE_SECONDS),
+        suffix: `, ${POWER_AVERAGE_SECONDS / 60} min average`
+    }
+}
+
 function minutes(time) {
     const out = new Float64Array(time.length)
     for (let i = 0; i < time.length; i++) {
@@ -315,6 +335,7 @@ export default {
             error: null,
             pickTarget: 'main',
             alignedStep: null,
+            averagePower: false,
             voltmeterFile: false,
             voltmeterValue: '',
             voltmeterStatus: '',
@@ -405,9 +426,10 @@ export default {
         powerSeries() {
             const c = this.run.samples.cols
             const x = this.ownX
+            const power = heaterPower(this.run, this.averagePower)
             const list = [
-                { label: 'Bed heater power', x, y: c.H2_pwm, color: COLORS.bed },
-                { label: 'Chamber heater power', x, y: c.H3_pwm, color: COLORS.air },
+                { label: `Bed heater power${power.suffix}`, x, y: power.bed, color: COLORS.bed },
+                { label: `Chamber heater power${power.suffix}`, x, y: power.chamber, color: COLORS.air },
                 { label: FAN_NAMES.F4, x, y: c.F4_act, color: COLORS.element },
                 { label: FAN_NAMES.F7, x, y: c.F7_act, color: COLORS.hepa }
             ]
@@ -418,10 +440,10 @@ export default {
                 }
             }
             if (this.reference) {
-                const r = this.reference.samples.cols
                 const rx = this.referenceX
-                list.push({ label: 'ref Bed heater power', x: rx, y: r.H2_pwm, color: COLORS.bed, dashed: true })
-                list.push({ label: 'ref Chamber heater power', x: rx, y: r.H3_pwm, color: COLORS.air, dashed: true })
+                const other = heaterPower(this.reference, this.averagePower)
+                list.push({ label: `ref Bed heater power${other.suffix}`, x: rx, y: other.bed, color: COLORS.bed, dashed: true })
+                list.push({ label: `ref Chamber heater power${other.suffix}`, x: rx, y: other.chamber, color: COLORS.air, dashed: true })
             }
             return Object.freeze(list)
         },
