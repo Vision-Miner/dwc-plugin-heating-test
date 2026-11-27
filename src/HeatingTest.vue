@@ -47,10 +47,19 @@
         </v-card-text>
       </v-card>
 
-      <v-card v-if="voltmeterRows.length" class="mb-3">
+      <v-card v-if="voltmeterOpen || voltmeterRows.length" class="mb-3">
         <v-card-title class="subtitle-1">Mains voltmeter</v-card-title>
         <v-card-text>
-          <v-simple-table dense>
+          <v-row v-if="voltmeterOpen" dense align="center" class="mb-2">
+            <v-col cols="12" md="3">
+              <v-text-field v-model="voltmeterValue" label="Voltmeter reading now, V" dense hide-details :disabled="sending" @keyup.enter="sendVoltmeter" />
+            </v-col>
+            <v-col cols="12" md="9">
+              <v-btn small class="mr-2" :disabled="sending" @click="sendVoltmeter">Save reading</v-btn>
+              <span class="caption">{{ voltmeterStatus }}</span>
+            </v-col>
+          </v-row>
+          <v-simple-table v-if="voltmeterRows.length" dense>
             <thead>
               <tr>
                 <th>Minutes</th>
@@ -167,7 +176,7 @@
 
 import JSZip from 'jszip'
 import saveAs from 'file-saver'
-import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR } from './lib/abi.js'
+import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR, VOLTMETER_INPUT } from './lib/abi.js'
 import { parseEvents, parseHeader, parseSamples } from './lib/parse.js'
 import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, unexpectedGaps } from './lib/kpi.js'
 import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTime, runTimeLabel } from './lib/labels.js'
@@ -192,6 +201,10 @@ const COLORS = {
     v12: '#ec407a',
     mains: '#7e57c2'
 }
+
+// A plausible mains reading at the socket, 110-120 V and 220-240 V classes with their sag and surge
+const MAINS_LOW = 50
+const MAINS_HIGH = 300
 
 // Each look at a recording run downloads the newest samples file, at most 10 minutes of rows, and what else grew
 const LIVE_SECONDS = 15
@@ -259,6 +272,16 @@ function hasRows(texts) {
     return text !== undefined && text.split('\n').length > 2
 }
 
+function voltmeterTakes(events) {
+    let count = 0
+    for (let i = 0; i < events.length; i++) {
+        if (events[i].code === EVENT.VOLTMETER) {
+            count++
+        }
+    }
+    return count
+}
+
 // <serial>_<date>_<time>_<plan>, with the folder name in place of a clock that was not set
 function exportName(folder, header) {
     const clean = (text) => (text || '').replace(/[^A-Za-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '')
@@ -292,6 +315,10 @@ export default {
             error: null,
             pickTarget: 'main',
             alignedStep: null,
+            voltmeterFile: false,
+            voltmeterValue: '',
+            voltmeterStatus: '',
+            sending: false,
             liveError: null,
             waiting: false
         }
@@ -317,6 +344,9 @@ export default {
         },
         runEnded() {
             return this.run.events.some((event) => event.code === EVENT.RUN_END)
+        },
+        voltmeterOpen() {
+            return this.recording && this.voltmeterFile && !this.runEnded
         },
         folderItems() {
             const items = []
@@ -577,6 +607,14 @@ export default {
             this.range = [0, this.duration]
             this.alignedStep = null
         },
+        recording(now) {
+            this.voltmeterFile = false
+            this.voltmeterStatus = ''
+            this.pending = null
+            if (now) {
+                this.checkVoltmeterFile()
+            }
+        },
         // The loop itself starts in showRun, once the followed run is on screen
         following(now, before) {
             clearTimeout(this.liveTimer)
@@ -598,6 +636,7 @@ export default {
         this.source = null
         this.liveTimer = null
         this.polling = false
+        this.pending = null
     },
     mounted() {
         this.refresh()
@@ -628,6 +667,20 @@ export default {
                 values.push([`Bed rate ${bin.low}-${bin.high} C, C/s`, fixed(bin.rate, 3)])
             }
             return values
+        },
+        // A run file's text, or null when it cannot be read
+        async download(folder, name) {
+            try {
+                return await this.$store.dispatch('machine/download', {
+                    filename: `${RUNS_DIR}/${folder}/${name}`,
+                    type: 'text',
+                    showProgress: false,
+                    showSuccess: false,
+                    showError: false
+                })
+            } catch (e) {
+                return null
+            }
         },
         // The run files whose size on the card differs from the last download: all of them the first time, and during a
         // live run the newest samples file and whatever else grew. True when anything changed.
@@ -685,14 +738,76 @@ export default {
                 if (await this.downloadChanged(source) && this.source === source) {
                     this.showSource(source)
                 }
+                // The test creates it once the heaters are at full power
+                if (this.recording && !this.voltmeterFile) {
+                    await this.checkVoltmeterFile()
+                }
                 this.liveError = null
             } catch (e) {
                 this.liveError = e.message || `${e}`
             } finally {
                 this.polling = false
             }
+            if (this.pending && this.run && voltmeterTakes(this.run.events) > this.pending.before) {
+                this.voltmeterStatus = `Taken: ${this.pending.volts} V`
+                this.pending = null
+            }
             if (!ended && this.following) {
                 this.schedule(LIVE_SECONDS * 1000)
+            }
+        },
+        async voltmeterFileExists() {
+            const cut = VOLTMETER_INPUT.lastIndexOf('/')
+            const name = VOLTMETER_INPUT.substring(cut + 1)
+            const items = await this.$store.dispatch('machine/getFileList', VOLTMETER_INPUT.substring(0, cut))
+            for (let i = 0; i < items.length; i++) {
+                if (!items[i].isDirectory && items[i].name === name) {
+                    return true
+                }
+            }
+            return false
+        },
+        async checkVoltmeterFile() {
+            try {
+                this.voltmeterFile = await this.voltmeterFileExists()
+            } catch (e) {
+                this.voltmeterFile = false
+            }
+        },
+        // The same write as a save in DWC's editor. The test takes the file within a row and writes a VOLTMETER event.
+        async sendVoltmeter() {
+            const volts = Number(this.voltmeterValue.trim().replace(',', '.'))
+            if (!(volts >= MAINS_LOW && volts <= MAINS_HIGH)) {
+                this.voltmeterStatus = `Type the reading in volts, ${MAINS_LOW} to ${MAINS_HIGH}`
+                return
+            }
+            const folder = this.run.name
+            this.sending = true
+            try {
+                // An upload creates a missing file, and outside a run nothing would take it out of the macro list
+                if (!(await this.voltmeterFileExists())) {
+                    this.voltmeterFile = false
+                    this.voltmeterStatus = 'The test no longer takes readings'
+                    return
+                }
+                // Counted on the card: readings saved in the editor since the run was loaded are already there
+                const current = await this.download(folder, FILES.events)
+                const before = current === null ? 0 : voltmeterTakes(parseEvents(current))
+                await this.$store.dispatch('machine/upload', {
+                    filename: VOLTMETER_INPUT,
+                    content: new Blob([`${volts}\n`]),
+                    showProgress: false,
+                    showSuccess: false,
+                    showError: false
+                })
+                this.voltmeterValue = ''
+                this.voltmeterStatus = `Sent ${volts} V, waiting for the test to take it. Between steps it takes it on the next step's first row.`
+                this.pending = { volts, before }
+                this.schedule(3000)
+            } catch (e) {
+                this.error = e.message || `${e}`
+            } finally {
+                this.sending = false
             }
         },
         async withLoading(job) {
@@ -728,6 +843,9 @@ export default {
                 }
                 if (this.selected) {
                     await this.showRun(this.selected)
+                }
+                if (this.recording) {
+                    await this.checkVoltmeterFile()
                 }
             })
         },

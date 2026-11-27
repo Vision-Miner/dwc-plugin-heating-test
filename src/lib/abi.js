@@ -12,6 +12,8 @@ export const FILES = {
     summary: 'summary.txt'
 }
 export const VOLTMETER_FILE = /^voltmeter-.+\.txt$/
+// Created by the test only while it takes readings; the page writes here only while the file exists
+export const VOLTMETER_INPUT = '0:/macros/System/Troubleshooting/Advanced Heating Test - Voltmeter.txt'
 
 export const STRING_COLUMNS = new Set([
     'status', 'b1_state', 'H0_state', 'H1_state', 'H2_state', 'H3_state',
