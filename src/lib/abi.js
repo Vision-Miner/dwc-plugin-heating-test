@@ -1,5 +1,5 @@
 // Data contract with sys/lib/heattest/ in vm22-v4-firmware. See ABI.md.
-export const ABI_VERSION = 1
+export const ABI_VERSION = 2
 export const RUNS_DIR = '0:/sys/logs/heattest'
 export const RUN_PREFIX = 'ht'
 export const FILES = {

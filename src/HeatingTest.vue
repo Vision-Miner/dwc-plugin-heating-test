@@ -392,8 +392,8 @@ export default {
             if (identity.length) {
                 lines.push(identity.join(', '))
             }
-            if (header.abi && parseInt(header.abi, 10) !== ABI_VERSION) {
-                lines.push(`Data contract version ${header.abi}, this plugin reads ${ABI_VERSION}.`)
+            if (parseInt(header.abi, 10) > ABI_VERSION) {
+                lines.push(`Data format version ${header.abi} is newer than this plugin reads (${ABI_VERSION}): update the plugin.`)
             }
 
             // Say what "no fault" covered: the chamber is checked only while it is cold
