@@ -138,7 +138,7 @@ import saveAs from 'file-saver'
 import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR } from './lib/abi.js'
 import { parseEvents, parseHeader, parseSamples } from './lib/parse.js'
 import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, unexpectedGaps } from './lib/kpi.js'
-import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTimeLabel } from './lib/labels.js'
+import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTime, runTimeLabel } from './lib/labels.js'
 import { textsFromZip } from './lib/zipfiles.js'
 import { whatIf } from './lib/faultModel.js'
 import FaultTable from './FaultTable.vue'
@@ -188,6 +188,13 @@ function buildRun(name, texts) {
         airCheck: airCheck(steps, stepKpis),
         powerDips: Object.freeze(findPowerDips(samples))
     })
+}
+
+// <serial>_<date>_<time>_<plan>, with the folder name in place of a clock that was not set
+function exportName(folder, header) {
+    const clean = (text) => (text || '').replace(/[^A-Za-z0-9.-]+/g, '-').replace(/^-+|-+$/g, '')
+    const time = runTime(folder)
+    return [clean(header.serial), time ? time.replace(' ', '_').replace(':', '-') : folder, clean(header.plan)].filter(Boolean).join('_')
 }
 
 function minutes(time) {
@@ -541,19 +548,24 @@ export default {
             return this.withLoading(async () => {
                 const items = await this.$store.dispatch('machine/getFileList', `${RUNS_DIR}/${folder}`)
                 const zip = new JSZip()
+                let header = {}
                 for (let i = 0; i < items.length; i++) {
                     if (!items[i].isDirectory) {
-                        zip.file(items[i].name, await this.$store.dispatch('machine/download', {
+                        const blob = await this.$store.dispatch('machine/download', {
                             filename: `${RUNS_DIR}/${folder}/${items[i].name}`,
                             type: 'blob',
                             showProgress: true,
                             showSuccess: false,
                             showError: false,
                             closeProgressOnSuccess: true
-                        }))
+                        })
+                        zip.file(items[i].name, blob)
+                        if (items[i].name === FILES.header) {
+                            header = parseHeader(await blob.text())
+                        }
                     }
                 }
-                saveAs(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), `${folder}.zip`)
+                saveAs(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), `${exportName(folder, header)}.zip`)
             })
         },
         pick(target) {

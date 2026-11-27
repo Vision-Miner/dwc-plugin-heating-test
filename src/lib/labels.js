@@ -79,11 +79,13 @@ export function headerMeaning(key) {
     return ''
 }
 
-// ht<epoch> holds the printer's local time written as UTC; ht<1000000 + upTime> means the clock was not set
-export function runTimeLabel(folder) {
+// ht<epoch> holds the printer's local time written as UTC; ht<1000000 + upTime> means the clock was not set.
+// "YYYY-MM-DD HH:MM", or null without a clock.
+export function runTime(folder) {
     const id = parseInt(folder.substring(2), 10)
-    if (!(id >= 1e9)) {
-        return 'no clock'
-    }
-    return new Date(id * 1000).toISOString().substring(0, 16).replace('T', ' ')
+    return id >= 1e9 ? new Date(id * 1000).toISOString().substring(0, 16).replace('T', ' ') : null
+}
+
+export function runTimeLabel(folder) {
+    return runTime(folder) || 'no clock'
 }
