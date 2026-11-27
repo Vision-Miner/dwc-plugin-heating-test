@@ -46,7 +46,7 @@ export default {
         title: { type: String, required: true },
         unit: { type: String, default: '' },
         height: { type: Number, default: 300 },
-        // [{ label, x (minutes), y, color, dashed, hidden }], with typed arrays
+        // [{ label, x (minutes), y, color, dashed, hidden, points }], with typed arrays; points marks each value
         series: { type: Array, required: true },
         // [from, to] in minutes
         range: { type: Array, required: true },
@@ -154,6 +154,7 @@ export default {
                     borderDash: item.dashed ? [5, 4] : [],
                     borderColor: item.color,
                     backgroundColor: item.color,
+                    pointRadius: item.points ? 3 : 0,
                     hidden: !!item.hidden
                 })
             }

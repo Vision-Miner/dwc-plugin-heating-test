@@ -8,6 +8,7 @@ export const FILES = {
     header: 'header.csv',
     summary: 'summary.txt'
 }
+export const VOLTMETER_FILE = /^voltmeter-.+\.txt$/
 
 export const STRING_COLUMNS = new Set([
     'status', 'b1_state', 'H0_state', 'H1_state', 'H2_state', 'H3_state',
@@ -21,6 +22,7 @@ export const EVENT = {
     STOP: 'STOP',
     NOT_REACHED: 'NOT_REACHED',
     WARN: 'WARN',
+    VOLTMETER: 'VOLTMETER',
     RUN_END: 'RUN_END'
 }
 

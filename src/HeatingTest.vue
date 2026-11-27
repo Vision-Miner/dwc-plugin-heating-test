@@ -41,6 +41,36 @@
           <time-chart title="Temperature" unit="C" :height="360" :series="temperatureSeries" :range="range" :marks="marks" />
           <time-chart title="Heaters and fans" :height="240" :series="powerSeries" :range="range" :marks="marks" class="mt-3" />
           <time-chart title="Voltages" unit="V" :height="200" :series="voltageSeries" :range="range" :marks="marks" class="mt-3" />
+          <time-chart v-if="mainsSeries.length" title="Mains at the socket, from the voltmeter" unit="V" :height="200" :series="mainsSeries" :range="range" :marks="marks" class="mt-3" />
+        </v-card-text>
+      </v-card>
+
+      <v-card v-if="voltmeterRows.length" class="mb-3">
+        <v-card-title class="subtitle-1">Mains voltmeter</v-card-title>
+        <v-card-text>
+          <v-simple-table dense>
+            <thead>
+              <tr>
+                <th>Minutes</th>
+                <th>Step</th>
+                <th>Mains, V</th>
+                <th>Bed / chamber heater power</th>
+                <th>As typed</th>
+                <th>File</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in voltmeterRows" :key="row.key">
+                <td>{{ row.minutes }}</td>
+                <td>{{ row.step }}</td>
+                <td>{{ row.volts }}</td>
+                <td>{{ row.power }}</td>
+                <td>{{ row.typed }}</td>
+                <td class="grey--text">{{ row.file }}</td>
+              </tr>
+            </tbody>
+          </v-simple-table>
+          <div class="caption mt-1">At a socket next to the printer. The time is when the test took the reading, within a second of the save.</div>
         </v-card-text>
       </v-card>
 
@@ -135,11 +165,12 @@
 
 import JSZip from 'jszip'
 import saveAs from 'file-saver'
-import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR } from './lib/abi.js'
+import { ABI_VERSION, EVENT, FILES, RUN_PREFIX, RUNS_DIR, VOLTMETER_FILE } from './lib/abi.js'
 import { parseEvents, parseHeader, parseSamples } from './lib/parse.js'
 import { airCheck, findFaults, findPowerDips, findSteps, runKpi, runStatus, stepKpi, stepLabel, unexpectedGaps } from './lib/kpi.js'
 import { FAN_NAMES, SENSOR_NAMES, headerMeaning, runTime, runTimeLabel } from './lib/labels.js'
 import { textsFromZip } from './lib/zipfiles.js'
+import { voltmeterReadings } from './lib/voltmeter.js'
 import { whatIf } from './lib/faultModel.js'
 import FaultTable from './FaultTable.vue'
 import StepTable from './StepTable.vue'
@@ -156,7 +187,8 @@ const COLORS = {
     fan: '#26a69a',
     hepa: '#8d6e63',
     vin: '#5c6bc0',
-    v12: '#ec407a'
+    v12: '#ec407a',
+    mains: '#7e57c2'
 }
 
 // Frozen so Vue does not walk the columns
@@ -164,6 +196,7 @@ function buildRun(name, texts) {
     const samples = parseSamples(texts.samples)
     const events = texts.events ? parseEvents(texts.events) : []
     const header = texts.header ? parseHeader(texts.header) : {}
+    const voltmeterFiles = Object.assign({}, texts.voltmeter)
     const steps = findSteps(samples, events)
     const kpi = runKpi(samples)
     const stepKpis = []
@@ -186,8 +219,29 @@ function buildRun(name, texts) {
         heaterFaults: Object.freeze(findFaults(samples)),
         gapsShown: Object.freeze(unexpectedGaps(samples, steps)),
         airCheck: airCheck(steps, stepKpis),
-        powerDips: Object.freeze(findPowerDips(samples))
+        powerDips: Object.freeze(findPowerDips(samples)),
+        voltmeterFiles: Object.freeze(voltmeterFiles),
+        readings: Object.freeze(voltmeterReadings(voltmeterFiles, events, samples))
     })
+}
+
+// The idle reading from header.csv at the start, then every reading the test took, in minutes
+function mainsPoints(run, shift) {
+    const x = []
+    const y = []
+    const idle = parseFloat(run.header.mains_v_idle)
+    if (idle > 0) {
+        x.push(shift)
+        y.push(idle)
+    }
+    for (let i = 0; i < run.readings.length; i++) {
+        const reading = run.readings[i]
+        if (isFinite(reading.time) && isFinite(reading.volts)) {
+            x.push(reading.time / 60 + shift)
+            y.push(reading.volts)
+        }
+    }
+    return { x: Float64Array.from(x), y: Float64Array.from(y) }
 }
 
 // <serial>_<date>_<time>_<plan>, with the folder name in place of a clock that was not set
@@ -324,6 +378,42 @@ export default {
                 list.push({ label: 'EXP3HC 24 V', x, y: c.vin1, color: COLORS.fan, hidden: true })
             }
             return Object.freeze(list)
+        },
+        mainsSeries() {
+            const list = []
+            const own = mainsPoints(this.run, 0)
+            if (own.x.length) {
+                list.push({ label: 'Mains at the socket', x: own.x, y: own.y, color: COLORS.mains, points: true })
+            }
+            if (this.reference) {
+                const other = mainsPoints(this.reference, this.referenceShift)
+                if (other.x.length) {
+                    list.push({ label: 'ref Mains at the socket', x: other.x, y: other.y, color: COLORS.mains, dashed: true, points: true })
+                }
+            }
+            return Object.freeze(list)
+        },
+        voltmeterRows() {
+            const rows = []
+            const idle = parseFloat(this.run.header.mains_v_idle)
+            if (idle > 0) {
+                rows.push({ key: 'idle', minutes: 'before heating', step: '', volts: fixed(idle, 1), power: '-', typed: '', file: FILES.header })
+            }
+            const c = this.run.samples.cols
+            const percent = (value) => fixed(value * 100, 0, '%')
+            for (let i = 0; i < this.run.readings.length; i++) {
+                const reading = this.run.readings[i]
+                rows.push({
+                    key: reading.file,
+                    minutes: fixed(reading.time / 60, 1),
+                    step: isFinite(reading.step) ? `${reading.step}` : '',
+                    volts: isFinite(reading.volts) ? fixed(reading.volts, 1) : 'unreadable',
+                    power: reading.index >= 0 && c.H2_pwm && c.H3_pwm ? `${percent(c.H2_pwm[reading.index])} / ${percent(c.H3_pwm[reading.index])}` : '-',
+                    typed: reading.text.split('\n')[0],
+                    file: reading.file
+                })
+            }
+            return rows
         },
         marks() {
             const out = []
@@ -493,10 +583,19 @@ export default {
             }
         },
         async downloadRun(folder) {
-            const texts = { samples: await this.download(folder, FILES.samples, true) }
+            const texts = { samples: await this.download(folder, FILES.samples, true), voltmeter: {} }
             texts.events = await this.download(folder, FILES.events, false)
             texts.header = await this.download(folder, FILES.header, false)
             texts.summary = await this.download(folder, FILES.summary, false)
+            const items = await this.$store.dispatch('machine/getFileList', `${RUNS_DIR}/${folder}`)
+            for (let i = 0; i < items.length; i++) {
+                if (!items[i].isDirectory && VOLTMETER_FILE.test(items[i].name)) {
+                    const text = await this.download(folder, items[i].name, false)
+                    if (text !== null) {
+                        texts.voltmeter[items[i].name] = text
+                    }
+                }
+            }
             return buildRun(folder, texts)
         },
         async withLoading(job) {
@@ -577,16 +676,19 @@ export default {
         filesChosen(event) {
             const chosen = event.target.files
             return this.withLoading(async () => {
-                const texts = {}
+                const texts = { voltmeter: {} }
                 let name = 'files'
                 for (let i = 0; i < chosen.length; i++) {
                     if (/\.zip$/i.test(chosen[i].name)) {
                         const fromZip = await textsFromZip(JSZip, chosen[i], FILES)
-                        Object.assign(texts, fromZip)
+                        Object.assign(texts, fromZip, { voltmeter: Object.assign(texts.voltmeter, fromZip.voltmeter) })
                         name = chosen[i].name.replace(/\.zip$/i, '')
                         continue
                     }
                     const text = await chosen[i].text()
+                    if (VOLTMETER_FILE.test(chosen[i].name)) {
+                        texts.voltmeter[chosen[i].name] = text
+                    }
                     const keys = Object.keys(FILES)
                     for (let k = 0; k < keys.length; k++) {
                         if (chosen[i].name === FILES[keys[k]]) {
